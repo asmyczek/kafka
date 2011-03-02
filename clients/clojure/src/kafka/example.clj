@@ -1,6 +1,6 @@
 (ns #^{:doc "Producer/Consumer example."}
   kafka.example
-  (:use (clojure.contrib logging)
+  (:use (clojure.contrib [logging :only (error info)])
         (kafka types kafka print)))
 
 (defmacro thread
@@ -17,8 +17,8 @@
   (thread
     (with-open [c (consumer "localhost" 9092)]
       (doseq [m (consume-seq c "test" 0 {:blocking true})]
-        (println "Consumed <-- " m)))
-    (println "Finished consuming.")))
+        (info (str "Consumed <-- " m))))
+    (info "Finished consuming.")))
 
 (defn start-producer
   []
@@ -27,9 +27,9 @@
       (doseq [i (range 1 20)]
         (let [m (str "Message " i)]
           (produce p "test" 0 m)
-          (println "Produced --> " m)
+          (info (str "Produced --> " m))
           (Thread/sleep 1000))))
-    (println "Finished producing.")))
+    (info "Finished producing.")))
 
 (defn run
   []
