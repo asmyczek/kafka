@@ -12,6 +12,8 @@
 ; Utils
 ;
 
+(def *default-buffer-size* 65536)
+
 (defn- crc32-int
   "CRC for byte array."
   [^bytes ba]
@@ -26,8 +28,8 @@
   :send-buffer-size    - send socket buffer size, default 65536.
   :socket-timeout      - socket timeout."
   [^String host ^Integer port opts]
-  (let [receive-buf-size (or (:receive-buffer-size opts) 65536)
-        send-buf-size    (or (:send-buffer-size opts) 65536)
+  (let [receive-buf-size (or (:receive-buffer-size opts) *default-buffer-size*)
+        send-buf-size    (or (:send-buffer-size opts) *default-buffer-size*)
         so-timeout       (or (:socket-timeout opts) 60000)
         ch (SocketChannel/open)]
     (doto (.socket ch)
@@ -67,10 +69,10 @@
 (defn- send-message
   "Send messages."
   [channel topic partition messages opts]
-  (let [size (or (:send-buffer-size opts) 65536)]
+  (let [size (or (:send-buffer-size opts) *default-buffer-size*)]
     (with-buffer (buffer size)
         (length-encoded int                   ; request size
-          (put (short 0))                     ; request type
+          (put (short 0))                     ; produce request type
           (length-encoded short               ; topic size
             (put topic))                      ; topic
           (put (int partition))               ; partition
@@ -104,10 +106,10 @@
 (defn- offset-fetch-request
   "Fetch offsets request."
   [channel topic partition time max-offsets]
-  (let [size     (+ 4 2 2 (count topic) 4 8 4)]
+  (let [size     (+ 24 (count topic))]
     (with-buffer (buffer size)
       (length-encoded int         ; request size
-        (put (short 4))           ; request type
+        (put (short 4))           ; offsets request type
         (length-encoded short     ; topic size
           (put topic))            ; topic
         (put (int partition))     ; partition
@@ -124,7 +126,7 @@
     (with-buffer (buffer rsp-size)
       (read-completely-from channel)
       (flip)
-      (with-error-code "Fetch-Offsets"
+      (with-error-code "Fetch offsets"
         (loop [c (get-int) res []]
           (if (> c 0)
             (recur (dec c) (conj res (get-long)))
@@ -149,75 +151,113 @@
   [level config & msg]
   `(~level (str (consumer-key ~config) ": " ~@msg)))
 
-(defn- message-fetch-request
+; Fetch
+
+(defn- fetch-message-set
+  [config]
+  (length-encoded short           ; topic size
+    (put (:topic config)))        ; topic
+  (put (int (:partition config))) ; partition
+  (put (long @(:offset config)))  ; offset
+  (put (int (:max-size config)))) ; max size
+
+(defn- fetch-request
   "Fetch messages request."
   [channel config]
   (let [topic (:topic config)
         size  (+ 24 (count topic))]
     (with-buffer (buffer size)
       (length-encoded int               ; request size
-        (put (short 1))                 ; request type
-        (length-encoded short           ; topic size
-          (put topic))                  ; topic
-        (put (int (:partition config))) ; partition
-        (put (long @(:offset config)))  ; offset
-        (put (int (:max-size config)))) ; max size
+        (put (short 1))                 ; fetch request type
+        (fetch-message-set config))
         (flip)
         (write-to channel))))
 
-(defn- read-response
-  "Read response from buffer. Returns true if new messages received."
+(defn- read-message-set
+  "Read response from buffer."
   [config]
-  (with-error-code "Fetch-Messages"
+  (with-error-code "Fetch message set"
     (loop [off @(:offset config) msg []]
       (if (has-remaining)
-        (let [size    (get-int)  ; message size
+        (let [m-size  (get-int)  ; message size
               magic   (get-byte) ; magic
               crc     (get-int)  ; crc
-              message (get-array (- size 5))]
-          (recur (+ off size 4) (conj msg (unpack (Message. message)))))
+              message (get-array (- m-size 5))]
+          (recur (+ off m-size 4) (conj msg (unpack (Message. message)))))
         (do
           (log debug config "Fetched " (count msg) " messages.")
           (log debug config "New offset " off ".")
           (swap! (:queue config) #(reduce conj % (reverse msg)))
-          (reset! (:offset config) off)
-          (not (empty? msg)))))))
+          (reset! (:offset config) off))))))
 
 (defn- fetch-messages
-  "Message fetch, returns a pair [new offset, messages sequence]."
+  "Message fetch, writes messages into the config queue."
   [channel config]
-  (message-fetch-request channel config)
+  (fetch-request channel config)
+  (let [size (response-size channel)]
+    (with-buffer (buffer size)
+      (read-completely-from channel)
+      (flip)
+      (read-message-set config))))
+
+; Multifetch
+
+(defn- multifetch-request
+  "Multifetch messages request."
+  [channel config-map opts]
+  (let [size (or (:send-buffer-size opts) *default-buffer-size*)]
+    (with-buffer (buffer size)
+      (length-encoded int                  ; request size
+        (put (short 2))                    ; multifetch request type
+        (put (short (count config-map)))   ; fetch consumer count
+        (doseq [config (vals (sort config-map))]
+          (fetch-message-set config)))
+        (flip)
+        (write-to channel))))
+
+(defn- multifetch-messages
+  "Multifetch messages."
+  [channel config-map opts]
+  (multifetch-request channel config-map opts)
   (let [rsp-size (response-size channel)]
     (with-buffer (buffer rsp-size)
       (read-completely-from channel)
       (flip)
-      (read-response config))))
+      (with-error-code "Multifetch messages"
+        (doseq [config (vals (sort config-map))]
+          (let [size (get-int)]  ; one message set size
+            (when (> size 0)
+              (slice size (read-message-set config)))))))))
 
 ; Consumer sequence
 
 (defn- seq-fetch
   "Non-blocking fetch function used by consumer sequence."
-  [channel config opts]
-  (fn []
-    (fetch-messages channel config)))
+  [channel config-map opts]
+  (fn [config]
+    (if (> (count @config-map) 1)
+      (multifetch-messages channel @config-map opts)
+      (fetch-messages channel config))))
 
 (defn- blocking-seq-fetch
   "Blocking fetch function used by consumer sequence."
-  [channel config opts]
+  [channel config-map opts]
   (let [repeat-count   (or (:repeat-count opts) 10)
         repeat-timeout (or (:repeat-timeout opts) 1000)]
-    (fn []
+    (fn [config]
       (loop [c repeat-count]
         (if (> c 0)
-          (when (not (fetch-messages channel config))
+          (do 
+            ((seq-fetch channel config-map opts) config)
+            (when (empty? @(:queue config))
               (Thread/sleep repeat-timeout)
-              (recur (dec c)))
+              (recur (dec c))))
           (log debug config "Stopping blocking seq fetch."))))))
 
 (defn- fetch-queue
   [config fetch-fn]
   (if (empty? @(:queue config))
-    (fetch-fn)))
+    (fetch-fn config)))
 
 (defn- consumer-seq
   "Sequence constructor."
@@ -251,7 +291,9 @@
 (defn consumer
   "Consumer factory. See new-channel for list of supported options."
   [host port & [opts]]
-  (let [channel     (new-channel host port opts)]
+  (let [channel    (new-channel host port opts)
+        multifetch (or (:multifetch opts) true)
+        fetch-map  (atom {})]
     (reify Consumer
       (consume [this topic partition offset max-size]
         (let [cfg (config topic partition offset max-size)]
@@ -271,11 +313,19 @@
                            0)
               max-size (or (:max-size opts) 1000000)
               cfg      (config topic partition offset max-size)
-              fetch-fn (if (:blocking opts)
-                         (blocking-seq-fetch channel cfg opts)
-                         (seq-fetch channel cfg opts))]
-          (log debug cfg "Initializing last offset to " offset ".")
-          (consumer-seq cfg fetch-fn)))
+              cfg-key  (consumer-key cfg)]
+          (when (@fetch-map cfg-key)
+            (throw (Exception. (str "Already consuming " cfg-key "."))))
+          (let [cfg-map  (if multifetch
+                           (do
+                             (swap! fetch-map assoc cfg-key cfg)
+                             fetch-map)
+                           (atom {cfg-key cfg}))
+                fetch-fn (if (:blocking opts)
+                           (blocking-seq-fetch channel cfg-map opts)
+                           (seq-fetch channel cfg-map opts))]
+            (log debug cfg "Initializing last offset to " offset ".")
+            (consumer-seq cfg fetch-fn))))
 
       (close [this]
         (close-channel channel)))))

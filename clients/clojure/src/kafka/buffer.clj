@@ -103,6 +103,15 @@
        (put (~f ba#))
        (.position parent# (+ (.position parent#) pos#)))))
 
+(defmacro slice
+  [length & body]
+  `(with-buffer (.slice (top))
+     (let [^ByteBuffer this#   (top)
+           ^ByteBuffer parent# (peek (pop *buf*))]
+       (.limit this# ~length)
+       (.position parent# (+ (.position parent#) ~length))
+       ~@body)))
+
 ;
 ; Read from buffer
 ;
