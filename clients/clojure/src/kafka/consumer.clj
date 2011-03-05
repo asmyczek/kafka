@@ -1,138 +1,12 @@
-(ns #^{:doc "Core kafka-clj module,
-            provides producer and consumer factories."}
-  kafka.kafka
-  (:use (kafka types buffer)
+(ns #^{:doc "Consumer factory."}
+  kafka.consumer
+  (:use (kafka types utils buffer)
         (clojure.contrib [logging :only (debug info error fatal)]))
-  (:import (kafka.types Message)
-           (java.nio.channels SocketChannel)
-           (java.net Socket InetSocketAddress)
-           (java.util.zip CRC32)))
+  (:import (kafka.types Message)))
 
 ; 
 ; Utils
 ;
-
-(def *default-buffer-size* 65536)
-
-(defn- crc32-int
-  "CRC for byte array."
-  [^bytes ba]
-  (let [crc (doto (CRC32.) (.update ba))
-        lv  (.getValue crc)]
-    (.intValue (bit-and lv 0xffffffff))))
-
-(defn- new-channel
-  "Create and setup a new channel for a host name, port and options.
-  Supported options:
-  :receive-buffer-size - receive socket buffer size, default 65536.
-  :send-buffer-size    - send socket buffer size, default 65536.
-  :socket-timeout      - socket timeout."
-  [^String host ^Integer port opts]
-  (let [receive-buf-size (or (:receive-buffer-size opts) *default-buffer-size*)
-        send-buf-size    (or (:send-buffer-size opts) *default-buffer-size*)
-        so-timeout       (or (:socket-timeout opts) 60000)
-        ch (SocketChannel/open)]
-    (doto (.socket ch)
-      (.setReceiveBufferSize receive-buf-size)
-      (.setSendBufferSize send-buf-size)
-      (.setSoTimeout so-timeout))
-    (doto ch
-      (.configureBlocking true)
-      (.connect (InetSocketAddress. host port)))))
-
-(defn- close-channel
-  "Close the channel."
-  [^SocketChannel channel]
-  (.close channel)
-  (.close (.socket channel)))
-
-(defn- response-size
-  "Read first four bytes from channel as an integer."
-  [channel]
-  (with-buffer (buffer 4)
-    (read-completely-from channel)
-    (flip)
-    (get-int)))
-
-(defmacro with-error-code
-  "Convenience response error code check."
-  [ & body]
-  `(let [error-code# (get-short)] ; error code
-     (if (not= error-code# 0)
-       (error (str "Request returned error code: " error-code# "."))
-       ~@body)))
-
-; 
-; Producer
-;
-
-(defn- send-message
-  "Send messages."
-  [channel topic partition messages opts]
-  (let [size (or (:send-buffer-size opts) *default-buffer-size*)]
-    (with-buffer (buffer size)
-        (length-encoded int                   ; request size
-          (put (short 0))                     ; produce request type
-          (length-encoded short               ; topic size
-            (put topic))                      ; topic
-          (put (int partition))               ; partition
-          (length-encoded int                 ; messages size
-            (doseq [m messages]
-              (let [^Message pm (pack m)]
-                (length-encoded int           ; message size
-                  (put (byte 0))              ; magic
-                  (with-put 4 crc32-int       ; crc
-                    (put (.message pm)))))))) ; message
-        (flip)
-        (write-to channel))))
-
-(defn producer
-  "Producer factory. See new-channel for list of supported options."
-  [host port & [opts]]
-  (let [channel (new-channel host port opts)]
-    (reify Producer
-      (produce [this topic partition messages]
-               (let [msg (if (sequential? messages) messages [messages])]
-                 (send-message channel topic partition msg opts)))
-      (close [this]
-             (close-channel channel)))))
-
-;
-; Consumer
-;
-
-; Offset
-
-(defn- offset-fetch-request
-  "Fetch offsets request."
-  [channel topic partition time max-offsets]
-  (let [size     (+ 24 (count topic))]
-    (with-buffer (buffer size)
-      (length-encoded int         ; request size
-        (put (short 4))           ; offsets request type
-        (length-encoded short     ; topic size
-          (put topic))            ; topic
-        (put (int partition))     ; partition
-        (put (long time))         ; time
-        (put (int max-offsets)))  ; max-offsets
-        (flip)
-        (write-to channel))))
-
-(defn- fetch-offsets
-  "Fetch offsets as an integer sequence."
-  [channel topic partition time max-offsets]
-  (offset-fetch-request channel topic partition time max-offsets)
-  (let [rsp-size (response-size channel)]
-    (with-buffer (buffer rsp-size)
-      (read-completely-from channel)
-      (flip)
-      (with-error-code
-        (loop [c (get-int) res []]
-          (if (> c 0)
-            (recur (dec c) (conj res (get-long)))
-            (doall res)))))))
- 
-; Messages
 
 (defn- config
   "Consumer configuration map."
@@ -151,7 +25,49 @@
   [level config & msg]
   `(~level (str (consumer-key ~config) ": " ~@msg)))
 
-; Fetch
+(defn- response-size
+  "Read first four bytes from channel as an integer."
+  [channel]
+  (with-buffer (buffer 4)
+    (read-completely-from channel)
+    (flip)
+    (get-int)))
+
+(defmacro with-error-code
+  "Convenience response error code check."
+  [ & body]
+  `(let [error-code# (get-short)] ; error code
+     (if (not= error-code# 0)
+       (error (str "Request returned error code: " error-code# "."))
+       ~@body)))
+
+(defmacro read-response
+  [ channel & body ]
+  `(let [size# (response-size ~channel)]
+     (with-buffer (buffer size#)
+        (read-completely-from ~channel)
+        (flip)
+        (with-error-code
+          ~@body))))
+
+;
+; Requests
+;
+
+(defn- fetch-offset-request
+  "Fetch offsets request."
+  [channel topic partition time max-offsets]
+  (let [size     (+ 24 (count topic))]
+    (with-buffer (buffer size)
+      (length-encoded int         ; request size
+        (put (short 4))           ; offsets request type
+        (length-encoded short     ; topic size
+          (put topic))            ; topic
+        (put (int partition))     ; partition
+        (put (long time))         ; time
+        (put (int max-offsets)))  ; max-offsets
+        (flip)
+        (write-to channel))))
 
 (defn- fetch-message-set
   [config]
@@ -173,6 +89,33 @@
         (flip)
         (write-to channel))))
 
+(defn- multifetch-request
+  "Multifetch messages request."
+  [channel config-map opts]
+  (let [size (or (:send-buffer-size opts) *default-buffer-size*)]
+    (with-buffer (buffer size)
+      (length-encoded int                  ; request size
+        (put (short 2))                    ; multifetch request type
+        (put (short (count config-map)))   ; fetch consumer count
+        (doseq [config (vals (sort config-map))]
+          (fetch-message-set config)))
+        (flip)
+        (write-to channel))))
+
+;
+; Fetch functions
+;
+
+(defn- fetch-offsets
+  "Fetch offsets as an integer sequence."
+  [channel topic partition time max-offsets]
+  (fetch-offset-request channel topic partition time max-offsets)
+  (read-response channel
+    (loop [c (get-int) res []]
+      (if (> c 0)
+        (recur (dec c) (conj res (get-long)))
+        (doall res)))))
+
 (defn- read-message-set
   "Read response from buffer."
   [config]
@@ -189,36 +132,12 @@
         (swap! (:queue config) #(reduce conj % (reverse msg)))
         (reset! (:offset config) off)))))
 
-(defmacro read-response
-  [ channel & body ]
-  `(let [size# (response-size ~channel)]
-     (with-buffer (buffer size#)
-        (read-completely-from ~channel)
-        (flip)
-        (with-error-code
-          ~@body))))
-
 (defn- fetch-messages
   "Message fetch, writes messages into the config queue."
   [channel config]
   (fetch-request channel config)
   (read-response channel
     (read-message-set config)))
-
-; Multifetch
-
-(defn- multifetch-request
-  "Multifetch messages request."
-  [channel config-map opts]
-  (let [size (or (:send-buffer-size opts) *default-buffer-size*)]
-    (with-buffer (buffer size)
-      (length-encoded int                  ; request size
-        (put (short 2))                    ; multifetch request type
-        (put (short (count config-map)))   ; fetch consumer count
-        (doseq [config (vals (sort config-map))]
-          (fetch-message-set config)))
-        (flip)
-        (write-to channel))))
 
 (defn- multifetch-messages
   "Multifetch messages."
@@ -231,7 +150,9 @@
           (with-error-code
             (slice (- size 2) (read-message-set config))))))))
 
+;
 ; Consumer sequence
+;
 
 (defn- seq-fetch
   "Non-blocking fetch function used by consumer sequence."
@@ -256,10 +177,10 @@
               (recur (dec c))))
           (log debug config "Stopping blocking seq fetch."))))))
 
-(defn- fetch-queue
+(defmacro fetch-queue
   [config fetch-fn]
-  (if (empty? @(:queue config))
-    (fetch-fn config)))
+  `(if (empty? @(:queue ~config))
+    (~fetch-fn ~config)))
 
 (defn- consumer-seq
   "Sequence constructor."
@@ -288,7 +209,9 @@
     (toString [this]
       (str "ConsumerQueue"))))
 
-; Consumer factory 
+;
+; Consumer factory
+;
 
 (defn consumer
   "Consumer factory. See new-channel for list of supported options."
