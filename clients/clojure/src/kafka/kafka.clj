@@ -56,10 +56,10 @@
 
 (defmacro with-error-code
   "Convenience response error code check."
-  [request & body]
+  [ & body]
   `(let [error-code# (get-short)] ; error code
      (if (not= error-code# 0)
-       (error (str "Request " ~request " returned error code: " error-code# "."))
+       (error (str "Request returned error code: " error-code# "."))
        ~@body)))
 
 ; 
@@ -126,7 +126,7 @@
     (with-buffer (buffer rsp-size)
       (read-completely-from channel)
       (flip)
-      (with-error-code "Fetch offsets"
+      (with-error-code
         (loop [c (get-int) res []]
           (if (> c 0)
             (recur (dec c) (conj res (get-long)))
@@ -176,29 +176,34 @@
 (defn- read-message-set
   "Read response from buffer."
   [config]
-  (with-error-code "Fetch message set"
-    (loop [off @(:offset config) msg []]
-      (if (has-remaining)
-        (let [m-size  (get-int)  ; message size
-              magic   (get-byte) ; magic
-              crc     (get-int)  ; crc
-              message (get-array (- m-size 5))]
-          (recur (+ off m-size 4) (conj msg (unpack (Message. message)))))
-        (do
-          (log debug config "Fetched " (count msg) " messages.")
-          (log debug config "New offset " off ".")
-          (swap! (:queue config) #(reduce conj % (reverse msg)))
-          (reset! (:offset config) off))))))
+  (loop [off @(:offset config) msg []]
+    (if (has-remaining)
+      (let [m-size  (get-int)  ; message size
+            magic   (get-byte) ; magic
+            crc     (get-int)  ; crc
+            message (get-array (- m-size 5))]
+        (recur (+ off m-size 4) (conj msg (unpack (Message. message)))))
+      (do
+        (log debug config "Fetched " (count msg) " messages.")
+        (log debug config "New offset " off ".")
+        (swap! (:queue config) #(reduce conj % (reverse msg)))
+        (reset! (:offset config) off)))))
+
+(defmacro read-response
+  [ channel & body ]
+  `(let [size# (response-size ~channel)]
+     (with-buffer (buffer size#)
+        (read-completely-from ~channel)
+        (flip)
+        (with-error-code
+          ~@body))))
 
 (defn- fetch-messages
   "Message fetch, writes messages into the config queue."
   [channel config]
   (fetch-request channel config)
-  (let [size (response-size channel)]
-    (with-buffer (buffer size)
-      (read-completely-from channel)
-      (flip)
-      (read-message-set config))))
+  (read-response channel
+    (read-message-set config)))
 
 ; Multifetch
 
@@ -219,15 +224,12 @@
   "Multifetch messages."
   [channel config-map opts]
   (multifetch-request channel config-map opts)
-  (let [rsp-size (response-size channel)]
-    (with-buffer (buffer rsp-size)
-      (read-completely-from channel)
-      (flip)
-      (with-error-code "Multifetch messages"
-        (doseq [config (vals (sort config-map))]
-          (let [size (get-int)]  ; one message set size
-            (when (> size 0)
-              (slice size (read-message-set config)))))))))
+  (read-response channel
+    (doseq [config (vals (sort config-map))]
+      (let [size (get-int)]  ; one message set size
+        (when (> size 0)
+          (with-error-code
+            (slice (- size 2) (read-message-set config))))))))
 
 ; Consumer sequence
 
