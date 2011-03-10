@@ -1,16 +1,8 @@
-(ns #^{:doc "Producer/Consumer example."}
-  kafka.example
-  (:use (clojure.contrib [logging :only (error info)])
-        (kafka types producer consumer print)))
-
-(defmacro thread
-  "Executes body in a thread, logs exceptions."
-  [ & body]
-  `(future
-     (try
-       ~@body
-       (catch Exception e#
-         (error "Exception." e#)))))
+(ns #^{:doc "Simple producer consumer example."}
+  examples.simple
+  (:use (clojure.contrib [logging :only (info)])
+        (kafka types producer consumer print)
+        (examples utils)))
 
 (defn start-consumer
   []
@@ -35,4 +27,5 @@
   []
   (start-consumer)
   (start-producer))
+
 
