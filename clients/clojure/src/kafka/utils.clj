@@ -1,13 +1,15 @@
-(ns #^{:doc "General util functions."}
+(ns #^{:doc "General utilities."}
   kafka.utils
+  (:use (clojure.contrib [logging :only (debug info error fatal)]))
   (:import (java.nio.channels SocketChannel)
            (java.net InetSocketAddress)
            (java.util.zip CRC32)))
 
-(def *default-buffer-size* 65536)
+(def #^{:doc "Default buffer size used by all buffers."}
+  *default-buffer-size* 65536)
 
 (defn crc32-int
-  "CRC for byte array."
+  "CRC on a byte array."
   [^bytes ba]
   (let [crc (doto (CRC32.) (.update ba))
         lv  (.getValue crc)]
@@ -33,8 +35,18 @@
       (.connect (InetSocketAddress. host port)))))
 
 (defn close-channel
-  "Close the channel."
+  "Close the channel and socket."
   [^SocketChannel channel]
   (.close channel)
   (.close (.socket channel)))
+
+(defmacro client-key
+  "Generates key string from topic/partition."
+  [config]
+  `(str (:topic ~config) "-" (:partition ~config)))
+
+(defmacro log
+  "Log helper."
+  [level config & msg]
+  `(~level (str (client-key ~config) ": " ~@msg)))
 

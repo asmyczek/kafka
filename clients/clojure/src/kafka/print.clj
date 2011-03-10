@@ -1,4 +1,5 @@
-(ns #^{:doc "Basic Clojure print-dup -> read-string message serialization."}
+(ns #^{:doc "Basic Clojure print-dup -> read-string message serialization,
+            might be useful if used with Kafka producer-/consumer-shell."}
   kafka.print
   (:use kafka.types)
   (:import (kafka.types Message)))

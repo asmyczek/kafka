@@ -1,4 +1,5 @@
-(ns #^{:doc "Consumer factory."}
+(ns #^{:doc "Kafka consumer,
+            provides consumer factory."}
   kafka.consumer
   (:use (kafka types utils buffer)
         (clojure.contrib [logging :only (debug info error fatal)]))
@@ -17,16 +18,9 @@
    :offset    (atom offset)
    :queue     (atom (seq []))})
 
-(defmacro consumer-key
-  [config]
-  `(str (:topic ~config) "-" (:partition ~config)))
-
-(defmacro log
-  [level config & msg]
-  `(~level (str (consumer-key ~config) ": " ~@msg)))
-
 (defn- response-size
-  "Read first four bytes from channel as an integer."
+  "Reads response size, the first four bytes
+  from the channel and returns this as integer."
   [channel]
   (with-buffer (buffer 4)
     (read-completely-from channel)
@@ -42,6 +36,7 @@
        ~@body)))
 
 (defmacro read-response
+  "General read response wrapper macro."
   [ channel & body ]
   `(let [size# (response-size ~channel)]
      (with-buffer (buffer size#)
@@ -70,6 +65,7 @@
         (write-to channel))))
 
 (defn- fetch-message-set
+  "Fetch single message set used by fetch and multi-fetch."
   [config]
   (length-encoded short           ; topic size
     (put (:topic config)))        ; topic
@@ -78,7 +74,7 @@
   (put (int (:max-size config)))) ; max size
 
 (defn- fetch-request
-  "Fetch messages request."
+  "Single fetch messages request."
   [channel config]
   (let [topic (:topic config)
         size  (+ 24 (count topic))]
@@ -90,12 +86,12 @@
         (write-to channel))))
 
 (defn- multifetch-request
-  "Multifetch messages request."
+  "Multi-fetch messages request."
   [channel config-map opts]
   (let [size (or (:send-buffer-size opts) *default-buffer-size*)]
     (with-buffer (buffer size)
       (length-encoded int                  ; request size
-        (put (short 2))                    ; multifetch request type
+        (put (short 2))                    ; multi-fetch request type
         (put (short (count config-map)))   ; fetch consumer count
         (doseq [config (vals (sort config-map))]
           (fetch-message-set config)))
@@ -117,7 +113,7 @@
         (doall res)))))
 
 (defn- read-message-set
-  "Read response from buffer."
+  "Read message set response from buffer."
   [config]
   (loop [off @(:offset config) msg []]
     (if (has-remaining)
@@ -133,13 +129,13 @@
         (reset! (:offset config) off)))))
 
 (defn- fetch-messages
-  "Message fetch, writes messages into the config queue."
+  "Fetches and writes messages into the config queue."
   [channel config]
   (fetch-request channel config)
   (read-response channel
     (read-message-set config)))
 
-(defn- multifetch-messages
+(defn- multi-fetch-messages
   "Multifetch messages."
   [channel config-map opts]
   (multifetch-request channel config-map opts)
@@ -159,7 +155,7 @@
   [channel config-map opts]
   (fn [config]
     (if (> (count @config-map) 1)
-      (multifetch-messages channel @config-map opts)
+      (multi-fetch-messages channel @config-map opts)
       (fetch-messages channel config))))
 
 (defn- blocking-seq-fetch
@@ -214,10 +210,15 @@
 ;
 
 (defn consumer
-  "Consumer factory. See new-channel for list of supported options."
+  "Consumer factory listening on host:port and optional configuration parameters.
+  Following options are supported:
+  :multi-fetch         - if true, fetches messages for all consumer sequences.
+  :receive-buffer-size - receive socket buffer size, default 65536.
+  :send-buffer-size    - send socket buffer size, default 65536.
+  :socket-timeout      - socket timeout."
   [host port & [opts]]
   (let [channel    (new-channel host port opts)
-        multifetch (or (:multifetch opts) true)
+        multi-fetch (or (:multi-fetch opts) true)
         fetch-map  (atom {})]
     (reify Consumer
       (consume [this topic partition offset max-size]
@@ -238,10 +239,10 @@
                            0)
               max-size (or (:max-size opts) 1000000)
               cfg      (config topic partition offset max-size)
-              cfg-key  (consumer-key cfg)]
+              cfg-key  (client-key cfg)]
           (when (@fetch-map cfg-key)
             (throw (Exception. (str "Already consuming " cfg-key "."))))
-          (let [cfg-map  (if multifetch
+          (let [cfg-map  (if multi-fetch
                            (do
                              (swap! fetch-map assoc cfg-key cfg)
                              fetch-map)
