@@ -113,7 +113,9 @@
   (let [channel       (new-channel host port opts)
         multi-produce (or (:multi-produce opts) false)
         queue         (ref (seq []))
-        stop-handler  (start-producer-thread channel queue opts)]
+        stop-handler  (if multi-produce
+                        (start-producer-thread channel queue opts)
+                        (fn []))]
     (reify Producer
       (produce [this topic partition messages]
                (let [cfg (config topic partition messages)]
