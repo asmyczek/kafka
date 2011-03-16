@@ -50,11 +50,19 @@ You can provide a configuration map to the _consumer_ function with following op
  
 ### Consumer sequence
 
-The API provides a sequence interface that allows to consume messages with any sequence operator (beware of side-effects). One consumer can manage multiple sequences, each for one topic/partition respectively. Messages are fetch lazy and for all sequences at once. Every sequence can be configures as blocking or non-blocking.
+The API provides a sequence interface that allows to consume messages with any sequence operator. One consumer can manage multiple sequences, each for one topic/partition respectively. Messages are fetch lazy and for all sequences at once. Every sequence can be configures as blocking or non-blocking.
 
     (with-open [c (consumer "localhost" 9092)]
       (doseq [m (consume-seq c "test")]
         (println m)))
+
+Beware of side effects when using _consumer-seq_. As of now sequences are transient, for example the expression
+
+    (let [c1 (consume-seq c "test")
+          c2 (rest (consume-seq c "test"))]
+      (= (first c1) (first c2))
+    
+will evaluate to true.
 
 _consume-seq_ takes an optional map with following options:
 
