@@ -20,12 +20,13 @@
         (let [m (str "Message " i)]
           (produce p "test" 0 m)
           (info (str "Produced --> " m))
-          (Thread/sleep 1000))))
+          (Thread/sleep 500))))
     (info "Finished producing.")))
 
 (defn run
   []
-  (start-consumer)
-  (start-producer))
-
+  (let [c (start-consumer)
+        p (start-producer)]
+    (and @c @p)
+    (info "Done!")))
 

@@ -2,7 +2,8 @@
   (:use [leiningen.compile :only (eval-in-project)]))
 
 (def examples-map
-  {"1" {:name "Simple producer/consumer example."   :namespace 'examples.simple}})
+  {"1" {:name "Simple producer/consumer example."   :namespace 'examples.simple}
+   "2" {:name "Multi-produce/multi-fetch example."   :namespace 'examples.multi}})
    
 (defn run-example
   [project & args]
