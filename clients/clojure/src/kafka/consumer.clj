@@ -15,8 +15,15 @@
   {:topic     topic
    :partition partition
    :max-size  max-size
-   :offset    offset
-   :queue     nil})
+   :state     (atom {:offset offset
+                     :queue  nil})})
+(defmacro queue 
+  [config]
+  `(:queue @(:state ~config)))
+
+(defmacro offset 
+  [config]
+  `(:offset @(:state ~config)))
 
 (defn- response-size
   "Reads response size, the first four bytes
@@ -70,7 +77,7 @@
   (length-encoded short           ; topic size
     (put (:topic config)))        ; topic
   (put (int (:partition config))) ; partition
-  (put (long (:offset config)))  ; offset
+  (put (long (offset config)))    ; offset
   (put (int (:max-size config)))) ; max size
 
 (defn- fetch-request
@@ -115,18 +122,17 @@
 (defn- read-message-set
   "Read message set response from buffer."
   [config]
-  (loop [off (:offset config) msg []]
+  (loop [off (offset config) msg []]
     (if (has-remaining)
       (let [m-size  (get-int)  ; message size
             magic   (get-byte) ; magic
             crc     (get-int)  ; crc
             message (get-array (- m-size 5))]
         (recur (+ off m-size 4) (conj msg (unpack (Message. message)))))
-      (do
+      (let [n-queue (reduce conj (queue config) (reverse msg))]
         (log debug config "Fetched " (count msg) " messages.")
-        (log debug config "New offset " off ".")
-        (assoc config :queue (reduce conj (:queue config) (reverse msg))
-                      :offset off)))))
+        (log debug config "Last offset " off ".")
+        (swap! (:state config) assoc :queue n-queue :offset off)))))
 
 (defn- fetch-messages
   "Fetches and writes messages into the config queue."
@@ -138,18 +144,13 @@
 (defn- multi-fetch-messages
   "Multifetch messages."
   [channel config-map opts]
-  (multifetch-request channel config-map opts)
+  (multifetch-request channel @config-map opts)
   (read-response channel
-    (loop [config (vals (sort-by first config-map)) res {}]
-      (if (empty? config)
-        res
-        (let [size (get-int)]  ; one message set size
-          (if (> size 0)
-            (with-error-code
-              (let [cfg (slice (- size 2) (read-message-set (first config)))]
-                (recur (next config) (assoc res (client-key cfg) cfg))))
-            (let [cfg (first config)]
-              (recur (next config) (assoc res (client-key cfg) cfg)))))))))
+    (doseq [config (vals (sort-by first @config-map))]
+      (let [size (get-int)]  ; one message set size
+        (if (> size 0)
+          (with-error-code
+            (slice (- size 2) (read-message-set config))))))))
 
 ;
 ; Consumer sequence
@@ -160,9 +161,7 @@
   [channel config-map opts]
   (fn [config]
     (if (> (count @config-map) 1)
-      (let [cfg-map (multi-fetch-messages channel @config-map opts)]
-        (reset! config-map cfg-map)
-        (cfg-map (client-key config)))
+      (multi-fetch-messages channel config-map opts)
       (fetch-messages channel config))))
 
 (defn- blocking-seq-fetch
@@ -173,46 +172,45 @@
     (fn [config]
       (loop [c repeat-count]
         (if (> c 0)
-          (let [cfg ((seq-fetch channel config-map opts) config)]
-            (if (empty? (:queue cfg))
-              (do
+          (do
+            ((seq-fetch channel config-map opts) config)
+            (when (empty? (queue config))
                 (Thread/sleep repeat-timeout)
-                (recur (dec c)))
-              cfg))
-          (log debug config "Stopping blocking seq fetch."))))))
+                (recur (dec c))))
+        (log debug config "Stopping blocking seq fetch."))))))
 
-(defn- fetch-queue
+(defmacro fetch-queue
   "Fetch next messages."
-  [cfg fetch-fn]
-  (if (empty? (:queue @cfg))
-    (if-let [new-cfg (fetch-fn @cfg)]
-      (reset! cfg new-cfg))))
+  [config fetch-fn]
+  `(if (empty? (queue ~config))
+    (~fetch-fn ~config)))
 
 (defn- consumer-seq
   "Sequence constructor."
   [config fetch-fn]
-  (let [cfg (atom config)]
-    (reify
-      clojure.lang.IPersistentCollection
-        (seq [this]    this)
-        (cons [this _] (throw (Exception. "cons not supported for consumer sequence.")))
-        (empty [this]  nil)
-        (equiv [this o]
-          (fatal "Implement equiv for consumer seq!")
-          false)
-      clojure.lang.ISeq
-        (first [this]
-          (fetch-queue cfg fetch-fn)
-          (first (:queue @cfg)))
-        (next [this]
-          (fetch-queue cfg fetch-fn)
-          (if (not (empty? (:queue @cfg)))
-            (consumer-seq (update-in @cfg [:queue] rest) fetch-fn)))
-        (more [this]
-          (consumer-seq (update-in @cfg [:queue] rest) fetch-fn))
-      Object
-      (toString [this]
-        (str (client-key @cfg))))))
+  (reify
+    clojure.lang.IPersistentCollection
+      (seq [this]    this)
+      (cons [this _] (throw (Exception. "cons not supported for consumer sequence.")))
+      (empty [this]  nil)
+      (equiv [this o]
+        (fatal "Implement equiv for consumer seq!")
+        false)
+    clojure.lang.ISeq
+      (first [this]
+        (fetch-queue config fetch-fn)
+        (first (queue config)))
+      (next [this]
+        (swap! (:state config) assoc :queue (rest (queue config)))
+        (fetch-queue config fetch-fn)
+        (if (not (empty? (queue config)))
+          this))
+      (more [this]
+        (swap! (:state config) assoc :queue (rest (queue config)))
+            this)
+    Object
+    (toString [this]
+      (str (client-key config)))))
 
 ;
 ; Consumer factory
@@ -233,7 +231,7 @@
       (consume [this topic partition offset max-size]
         (let [cfg (config topic partition offset max-size)
               cfg (fetch-messages channel cfg)]
-          [(:offset cfg) (:queue cfg)]))
+          [(offset cfg) (queue cfg)]))
       
       (offsets [this topic partition time max-offsets]
         (fetch-offsets channel topic partition time max-offsets))
