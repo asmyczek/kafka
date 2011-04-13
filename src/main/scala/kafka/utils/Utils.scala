@@ -230,7 +230,49 @@ object Utils {
     else
       throw new IllegalArgumentException("Missing required property '" + name + "'")
   }
-  
+
+  /**
+   * Get a property of type java.util.Properties or throw and exception if no such property is defined.
+   */
+  def getProps(props: Properties, name: String): Properties = {
+    if(props.containsKey(name)) {
+      val propString = props.getProperty(name)
+      val propValues = propString.split(",")
+      val properties = new Properties
+      for(i <- 0 until propValues.length) {
+        val prop = propValues(i).split("=")
+        if(prop.length != 2)
+          throw new IllegalArgumentException("Illegal format of specifying properties '" + propValues(i) + "'")
+        properties.put(prop(0), prop(1))
+      }
+      properties
+    }
+    else
+      throw new IllegalArgumentException("Missing required property '" + name + "'")
+  }
+
+  /**
+   * Get a property of type java.util.Properties or return the default if no such property is defined
+   */
+  def getProps(props: Properties, name: String, default: Properties): Properties = {
+    if(props.containsKey(name)) {
+      val propString = props.getProperty(name)
+      val propValues = propString.split(",")
+      if(propValues.length < 1)
+        throw new IllegalArgumentException("Illegal format of specifying properties '" + propString + "'")
+      val properties = new Properties
+      for(i <- 0 until propValues.length) {
+        val prop = propValues(i).split("=")
+        if(prop.length != 2)
+          throw new IllegalArgumentException("Illegal format of specifying properties '" + propValues(i) + "'")
+        properties.put(prop(0), prop(1))
+      }
+      properties
+    }
+    else
+      default
+  }
+
   /**
    * Open a channel for the given file
    */
@@ -472,8 +514,8 @@ object Utils {
    * This method gets comma seperated values which contains key,value pairs and returns a map of
    * key value pairs. the format of allCSVal is key1:val1, key2:val2 ....
    */
-  private def getCSVMap(allCSVals: String, exceptionMsg:String, successMsg:String) :Map[String, Int] = {
-    val map = new mutable.HashMap[String, Int]
+  private def getCSVMap[K, V](allCSVals: String, exceptionMsg:String, successMsg:String) :Map[K, V] = {
+    val map = new mutable.HashMap[K, V]
     if("".equals(allCSVals))
       return map
     val csVals = allCSVals.split(",")
@@ -482,7 +524,7 @@ object Utils {
      try{
       val tempSplit = csVals(i).split(":")
       logger.info(successMsg + tempSplit(0) + " : " + Integer.parseInt(tempSplit(1).trim))
-      map += tempSplit(0) -> Integer.parseInt(tempSplit(1).trim)
+      map += tempSplit(0).asInstanceOf[K] -> Integer.parseInt(tempSplit(1).trim).asInstanceOf[V]
       } catch {
           case _ =>  logger.error(exceptionMsg + ": " + csVals(i))
         }
@@ -490,11 +532,17 @@ object Utils {
     map
   }
 
+  def getTopicRentionHours(retentionHours: String) : Map[String, Int] = {
+    val exceptionMsg = "Malformed token for topic.log.retention.hours in server.properties: "
+    val successMsg =  "The retention hour for "
+    getCSVMap(retentionHours, exceptionMsg, successMsg)
+  }
+
   def getTopicFlushIntervals(allIntervals: String) : Map[String, Int] = {
     val exceptionMsg = "Malformed token for topic.flush.Intervals.ms in server.properties: "
     val successMsg =  "The flush interval for "
     getCSVMap(allIntervals, exceptionMsg, successMsg)
-   }
+  }
 
   def getTopicPartitions(allPartitions: String) : Map[String, Int] = {
     val exceptionMsg = "Malformed token for topic.partition.counts in server.properties: "
@@ -502,13 +550,31 @@ object Utils {
     getCSVMap(allPartitions, exceptionMsg, successMsg)
   }
 
+  def getConsumerTopicMap(consumerTopicString: String) : Map[String, Int] = {
+    val exceptionMsg = "Malformed token for embeddedconsumer.topics in consumer.properties: "
+    val successMsg =  "The number of consumer thread for topic  "
+    getCSVMap(consumerTopicString, exceptionMsg, successMsg)
+  }
+
   def getObject[T<:AnyRef](className: String): T = {
-    val clazz = Class.forName(className)
-    val clazzT = clazz.asInstanceOf[Class[T]]
-    val constructors = clazzT.getConstructors
-    require(constructors.length == 1)
-    constructors.head.newInstance().asInstanceOf[T]
-  }  
+    className match {
+      case null => null.asInstanceOf[T]
+      case _ =>
+        val clazz = Class.forName(className)
+        val clazzT = clazz.asInstanceOf[Class[T]]
+        val constructors = clazzT.getConstructors
+        require(constructors.length == 1)
+        constructors.head.newInstance().asInstanceOf[T]
+    }
+  }
+
+  def propertyExists(prop: String): Boolean = {
+    if(prop == null)
+      false
+    else if(prop.compareTo("") == 0)
+      false
+    else true
+  }
 }
 
 class SnapshotStats(private val monitorDurationNs: Long = 30L * 1000L * 1000L * 1000L) {
@@ -533,6 +599,20 @@ class SnapshotStats(private val monitorDurationNs: Long = 30L * 1000L * 1000L * 
     }
   }
 
+  def recordThroughputMetric(data: Long) {
+    val stats = current.get
+    stats.addData(data)
+    val ageNs = time.nanoseconds - stats.start
+    // if the current stats are too old it is time to swap
+    if(ageNs >= monitorDurationNs) {
+      val swapped = current.compareAndSet(stats, new Stats())
+      if(swapped) {
+        complete.set(stats)
+        stats.end.set(time.nanoseconds)
+      }
+    }
+  }
+
   def getNumRequests(): Long = numCumulatedRequests.get
 
   def getRequestsPerSecond: Double = {
@@ -540,9 +620,19 @@ class SnapshotStats(private val monitorDurationNs: Long = 30L * 1000L * 1000L * 
     stats.numRequests / stats.durationSeconds
   }
 
+  def getThroughput: Double = {
+    val stats = complete.get
+    stats.totalData / stats.durationSeconds
+  }
+
   def getAvgMetric: Double = {
     val stats = complete.get
-    stats.totalRequestMetric / stats.numRequests
+    if (stats.numRequests == 0) {
+      0
+    }
+    else {
+      stats.totalRequestMetric / stats.numRequests
+    }
   }
 
   def getMaxMetric: Double = complete.get.maxRequestMetric
@@ -553,7 +643,14 @@ class SnapshotStats(private val monitorDurationNs: Long = 30L * 1000L * 1000L * 
     var numRequests = 0
     var totalRequestMetric: Long = 0L
     var maxRequestMetric: Long = 0L
+    var totalData: Long = 0L
     private val lock = new Object()
+
+    def addData(data: Long) {
+      lock synchronized {
+        totalData += data
+      }
+    }
 
     def add(requestNs: Long) {
       lock synchronized {

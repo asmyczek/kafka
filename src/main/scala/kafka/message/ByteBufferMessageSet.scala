@@ -43,18 +43,6 @@ class ByteBufferMessageSet(val buffer: ByteBuffer, val errorCOde: Int) extends M
     buffer.rewind()
   }
   
-  def this(messages: java.util.List[Message]) {
-    this(ByteBuffer.allocate(MessageSet.messageSetSize(messages)))
-    val iter = messages.iterator
-    while(iter.hasNext) {
-      val message = iter.next.asInstanceOf[Message]
-      buffer.putInt(message.size)
-      buffer.put(message.buffer)
-      message.buffer.rewind()
-    }
-    buffer.rewind()
-  }
-  
   def validBytes: Int = {
     if(validByteCount < 0) {
       val iter = iterator
@@ -65,7 +53,7 @@ class ByteBufferMessageSet(val buffer: ByteBuffer, val errorCOde: Int) extends M
   }
 
   /** Write the messages in this set to the given channel */
-  def writeTo(channel: WritableByteChannel, offset: Long, size: Long): Long = 
+  def writeTo(channel: WritableByteChannel, offset: Long, size: Long): Long =
     channel.write(buffer.duplicate)
   
   override def iterator: Iterator[Message] = {
@@ -84,7 +72,8 @@ class ByteBufferMessageSet(val buffer: ByteBuffer, val errorCOde: Int) extends M
         if(iter.remaining < size) {
           validByteCount = currValidBytes
           if (currValidBytes == 0)
-            throw new InvalidMessageSizeException("invalid message size:" + size + " only received bytes:" + iter.remaining)
+            throw new InvalidMessageSizeException("invalid message size:" + size + " only received bytes:" + iter.remaining
+              + " possible causes (1) a single message larger than the fetch size; (2) log corruption")
           return allDone()
         }
         currValidBytes += 4 + size

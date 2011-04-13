@@ -15,53 +15,66 @@
 */
 
 package kafka.producer.async
-                                
-import kafka.serializer.SerDeser
+
 import kafka.message.ByteBufferMessageSet
 import collection.mutable.HashMap
 import collection.mutable.Map
 import org.apache.log4j.Logger
 import kafka.api.ProducerRequest
-import kafka.producer.SimpleProducer
+import kafka.serializer.Encoder
+import kafka.producer.SyncProducer
+import java.util.Properties
 
-class EventHandler[T](val producer: SimpleProducer,
-                      val serializer: SerDeser[T]) {
+private[async] class EventHandler[T](val producer: SyncProducer,
+                                     val serializer: Encoder[T],
+                                     val cbkHandler: CallbackHandler[T]) extends IEventHandler[T] {
 
   private val logger = Logger.getLogger(classOf[EventHandler[T]])
-  
-  def handle(events: Seq[T]) {
-    send(serialize(collate(events)))        
+
+  override def init(props: Properties) { }
+
+  override def handle(events: Seq[QueueItem[T]], syncProducer: SyncProducer) {
+    var processedEvents = events
+    if(cbkHandler != null)
+      processedEvents = cbkHandler.beforeSendingData(events)
+    send(serialize(collate(processedEvents)), syncProducer)
   }
 
-  def send(messagesPerTopic: Map[String, ByteBufferMessageSet]) {
+  private def send(messagesPerTopic: Map[(String, Int), ByteBufferMessageSet], syncProducer: SyncProducer) {
     if(messagesPerTopic.size > 0) {
-      val requests = messagesPerTopic.map(f => new ProducerRequest(f._1, ProducerRequest.RandomPartition, f._2)).toArray
-      producer.multiSend(requests)
+      val requests = messagesPerTopic.map(f => new ProducerRequest(f._1._1, f._1._2, f._2)).toArray
+      syncProducer.multiSend(requests)
       if(logger.isDebugEnabled)
         logger.debug("kafka producer sent messages for topics " + messagesPerTopic)
     }
   }
 
-  def serialize(eventsPerTopic: Map[String, Seq[T]]): Map[String, ByteBufferMessageSet] = {
+  private def serialize(eventsPerTopic: Map[(String,Int), Seq[T]]): Map[(String, Int), ByteBufferMessageSet] = {
     import scala.collection.JavaConversions._
-    val eventsPerTopicMap = eventsPerTopic.map(e => (e._1, e._2.map(l => serializer.toMessage(l))))
-    eventsPerTopicMap.map(e => (e._1, new ByteBufferMessageSet(asList(e._2))))
+    val eventsPerTopicMap = eventsPerTopic.map(e => ((e._1._1, e._1._2) , e._2.map(l => serializer.toMessage(l))))
+    eventsPerTopicMap.map(e => ((e._1._1, e._1._2) , new ByteBufferMessageSet(e._2: _*)))
   }
 
-  def collate(events: Seq[T]): Map[String, Seq[T]] = {
-    val collatedEvents = new HashMap[String, Seq[T]]
-    val distinctTopics = events.map(e => serializer.getTopic(e)).distinct
+  private def collate(events: Seq[QueueItem[T]]): Map[(String,Int), Seq[T]] = {
+    val collatedEvents = new HashMap[(String, Int), Seq[T]]
+    val distinctTopics = events.map(e => e.getTopic).toSeq.distinct
+    val distinctPartitions = events.map(e => e.getPartition).distinct
 
     var remainingEvents = events
-    distinctTopics foreach { topic => 
-      val topicEvents = remainingEvents partition (serializer.getTopic(_).equals(topic))
+    distinctTopics foreach { topic =>
+      val topicEvents = remainingEvents partition (e => e.getTopic.equals(topic))
       remainingEvents = topicEvents._2
-      collatedEvents += (topic -> topicEvents._1)
+      distinctPartitions.foreach { p =>
+        val topicPartitionEvents = topicEvents._1 partition (e => (e.getPartition == p))
+        logger.info("Extracted events " + topicPartitionEvents._1.toString + " for (" + topic + "," + p)
+        logger.info("Remaining events " + topicPartitionEvents._2.toString)
+        collatedEvents += ( (topic, p) -> topicPartitionEvents._1.map(q => q.getData).toSeq)
+      }
     }
     collatedEvents
   }
-  
-  def close = {
+
+  override def close = {
     producer.close
   }
 }

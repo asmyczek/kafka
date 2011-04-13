@@ -28,7 +28,7 @@ import kafka.common._
 import kafka.api.OffsetRequest
 import java.util._
 
-object Log {
+private[log] object Log {
   val FILE_SUFFIX = ".kafka"
 
   /**
@@ -84,7 +84,7 @@ object Log {
 /**
  * A segment file in the log directory. Each log semgment consists of an open message set, a start offset and a size 
  */
-class LogSegment(val file: File, val messageSet: FileMessageSet, val start: Long) extends Range {
+private[log] class LogSegment(val file: File, val messageSet: FileMessageSet, val start: Long) extends Range {
   @volatile var deleted = false
   def size: Long = messageSet.highWaterMark
   override def toString() = "(file=" + file + ", start=" + start + ", size=" + size + ")"
@@ -95,7 +95,7 @@ class LogSegment(val file: File, val messageSet: FileMessageSet, val start: Long
  * An append-only log for storing messages. 
  */
 @threadsafe
-class Log(val dir: File, val maxSize: Long, val flushInterval: Int) {
+private[log] class Log(val dir: File, val maxSize: Long, val flushInterval: Int, val needRecovery: Boolean) {
 
   private val logger = Logger.getLogger(classOf[Log])
 
@@ -147,11 +147,11 @@ class Log(val dir: File, val maxSize: Long, val flushInterval: Int) {
       })
       validateSegments(accum)
 
-      // run recovery on the final section and make it mutable
+      //make the final section mutable and run recovery on it if necessary
       val last = accum.remove(accum.size - 1)
       last.messageSet.close()
-      logger.info("Loading the last segment in mutable mode and running recover on " + last.file.getAbsolutePath())
-      val mutable = new LogSegment(last.file, new FileMessageSet(last.file, true, new AtomicBoolean(true)), last.start)
+      logger.info("Loading the last segment " + last.file.getAbsolutePath() + " in mutable mode, recovery " + needRecovery)
+      val mutable = new LogSegment(last.file, new FileMessageSet(last.file, true, new AtomicBoolean(needRecovery)), last.start)
       accum.add(mutable)
     }
     new SegmentList(accum.toArray(new Array[LogSegment](accum.size)))

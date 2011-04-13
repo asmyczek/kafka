@@ -30,13 +30,6 @@ trait ConsumerConnector {
   def createMessageStreams(topicCountMap: Map[String,Int]) : Map[String,List[KafkaMessageStream]]
 
   /**
-   *  create a list of MessageStreams for each topic.
-   *  java binding.
-   */
-  def createMessageStreams(topicCountMap: java.util.Map[String,java.lang.Integer]):
-    java.util.Map[String,java.util.List[KafkaMessageStream]]
-
-  /**
    *  Commit the offsets of all broker partitions connected by this connector.
    */
   def commitOffsets
@@ -54,6 +47,12 @@ object Consumer {
   // constructor of ConsumerConnector
   def create(config: ConsumerConfig): ConsumerConnector = {
     val consumerConnect = new ZookeeperConsumerConnector(config)
+    Utils.swallow(logger.warn, Utils.registerMBean(consumerConnect, consumerStatsMBeanName))
+    consumerConnect
+  }
+
+  def createJavaConsumerConnector(config: ConsumerConfig): kafka.javaapi.consumer.ConsumerConnector = {
+    val consumerConnect = new kafka.javaapi.consumer.ZookeeperConsumerConnector(config)
     Utils.swallow(logger.warn, Utils.registerMBean(consumerConnect, consumerStatsMBeanName))
     consumerConnect
   }

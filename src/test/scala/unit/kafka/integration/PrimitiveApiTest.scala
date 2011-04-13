@@ -22,7 +22,7 @@ import junit.framework.Assert._
 import kafka.TestUtils
 import kafka.api.{ProducerRequest, FetchRequest}
 import kafka.message.{Message, ByteBufferMessageSet}
-import kafka.common.{WrongPartitionException, OffsetOutOfRangeException}
+import kafka.common.{OffsetOutOfRangeException, InvalidPartitionException}
 import kafka.server.{KafkaRequestHandlers, KafkaConfig}
 import org.apache.log4j.{Level, Logger}
 import org.scalatest.junit.JUnitSuite
@@ -40,13 +40,14 @@ class PrimitiveApiTest extends JUnitSuite with ProducerConsumerTestHarness with 
                }
   val configs = List(config)
   val requestHandlerLogger = Logger.getLogger(classOf[KafkaRequestHandlers])
-  
+
   @Test
   def testProduceAndFetch() {
     // send some messages
     val topic = "test"
-    // send an empty messageset first
-    val sent2 = new ByteBufferMessageSet(new java.util.ArrayList[Message]())
+
+//    send an empty messageset first
+    val sent2 = new ByteBufferMessageSet(Seq.empty[Message]: _*)
     producer.send(topic, sent2)
     Thread.sleep(200)
     sent2.buffer.rewind
@@ -56,6 +57,7 @@ class PrimitiveApiTest extends JUnitSuite with ProducerConsumerTestHarness with 
     // send some messages
     val sent3 = new ByteBufferMessageSet(new Message("hello".getBytes()), new Message("there".getBytes()))
     producer.send(topic, sent3)
+    Thread.sleep(200)
     sent3.buffer.rewind
     var fetched3: ByteBufferMessageSet = null
     while(fetched3 == null || fetched3.validBytes == 0)
@@ -134,35 +136,12 @@ class PrimitiveApiTest extends JUnitSuite with ProducerConsumerTestHarness with 
         fail("expect exception")
       }
       catch {
-        case e: WrongPartitionException => "this is good"
+        case e: InvalidPartitionException => "this is good"
       }
     }
 
     // restore set request handler logger to a higher level
     requestHandlerLogger.setLevel(Level.ERROR)
-  }
-
-  @Test
-  def testProduceAndMultiFetchJava() {
-    // send some messages
-    val topics = List("test1", "test2", "test3");
-    {
-      val messages = new mutable.HashMap[String, ByteBufferMessageSet]
-      val fetches : java.util.ArrayList[FetchRequest] = new java.util.ArrayList[FetchRequest]
-      for(topic <- topics) {
-        val set = new ByteBufferMessageSet(new Message(("a_" + topic).getBytes), new Message(("b_" + topic).getBytes))
-        messages += topic -> set
-        producer.send(topic, set)
-        set.buffer.rewind
-        fetches.add(new FetchRequest(topic, 0, 0, 10000))
-      }
-
-      // wait a bit for produced message to be available
-      Thread.sleep(200)
-      val response = consumer.multifetch(fetches)
-      for((topic, resp) <- topics.zip(response.toList))
-    	  TestUtils.checkEquals(messages(topic).iterator, resp.iterator)
-    }
   }
 
   @Test

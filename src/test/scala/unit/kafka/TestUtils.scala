@@ -89,7 +89,7 @@ object TestUtils {
   
   /**
    * Create a kafka server instance with appropriate test settings
-   * @config The configuration of the server
+   * @param config The configuration of the server
    */
   def createServer(config: KafkaConfig): KafkaServer = {
     val server = new KafkaServer(config)
@@ -200,12 +200,14 @@ object TestUtils {
   /**
    * Create a producer for the given host and port
    */
-  def createProducer(host: String, port: Int): SimpleProducer = {
-    return new SimpleProducer(host,
-                             port,
-                             64*1024,
-                             100000,
-                             10000)
+  def createProducer(host: String, port: Int): SyncProducer = {
+    val props = new Properties()
+    props.put("host", host)
+    props.put("port", port.toString)
+    props.put("buffer.size", "65536")
+    props.put("connect.timeout.ms", "100000")
+    props.put("reconnect.interval", "10000")
+    return new SyncProducer(new SyncProducerConfig(props))
   }
 
   def updateConsumerOffset(config : ConsumerConfig, path : String, offset : Long) = {
@@ -216,5 +218,5 @@ object TestUtils {
 }
 
 object TestZKUtils {
-  val zookeeperConnect = "localhost:7000"  
+  val zookeeperConnect = "127.0.0.1:2182"  
 }

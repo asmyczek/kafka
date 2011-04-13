@@ -25,14 +25,14 @@ import kafka.network._
 import kafka.message._
 import kafka.server._
 import kafka.api._
-import kafka.common.{WrongPartitionException, ErrorMapping}
+import kafka.common.ErrorMapping
 import kafka.utils.{Utils, SystemTime}
 import java.io.IOException
 
 /**
  * Logic to handle the various Kafka requests
  */
-class KafkaRequestHandlers(val logManager: LogManager) {
+private[kafka] class KafkaRequestHandlers(val logManager: LogManager) {
   
   private val logger = Logger.getLogger(classOf[KafkaRequestHandlers])
   
@@ -60,7 +60,7 @@ class KafkaRequestHandlers(val logManager: LogManager) {
     }
     catch {
       case e =>
-        logger.error("erorr processing ProduceRequst on " + request.topic + ":" + partition + " " + e + Utils.stackTrace(e))
+        logger.error("error processing ProduceRequst on " + request.topic + ":" + partition + " " + e + Utils.stackTrace(e))
         e match {
           case _: IOException =>
             logger.error("force shutdown due to " + e)
